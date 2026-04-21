@@ -1,0 +1,15 @@
+# Core training stack (pinned for reproducibility)
+torch>=2.5.1
+transformers>=4.40.0
+trl==0.12.2
+peft>=0.10.0
+bitsandbytes>=0.43.0
+accelerate>=0.29.0
+datasets>=2.19.0
+
+# Utilities
+wandb
+scipy
+numpy
+pandas
+matplotlib
