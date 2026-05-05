@@ -123,8 +123,10 @@ class NominalListwiseTrainer(Trainer):
         )  # [B*K]
 
         # ---- Reference forward (adapter disabled, no gradient) ----
+        # Unwrap DDP if needed: DDP wraps the model in .module
+        _base = model.module if hasattr(model, 'module') else model
         with torch.no_grad():
-            with model.disable_adapter():
+            with _base.disable_adapter():
                 ref_out = model(
                     input_ids=input_ids,
                     attention_mask=attention_mask,
@@ -195,8 +197,10 @@ class RobustListwiseTrainer(Trainer):
         log_probs = compute_per_sequence_log_probs(policy_out.logits, labels)
 
         # Reference forward (adapter OFF, no gradient)
+        # Unwrap DDP if needed
+        _base = model.module if hasattr(model, 'module') else model
         with torch.no_grad():
-            with model.disable_adapter():
+            with _base.disable_adapter():
                 ref_out = model(input_ids=input_ids, attention_mask=attention_mask)
         ref_log_probs = compute_per_sequence_log_probs(ref_out.logits.detach(), labels)
 
@@ -286,8 +290,10 @@ class BTListwiseTrainer(Trainer):
         log_probs = compute_per_sequence_log_probs(policy_out.logits, labels)
 
         # ---- Reference forward (adapter OFF, no grad) ----
+        # Unwrap DDP if needed
+        _base = model.module if hasattr(model, 'module') else model
         with torch.no_grad():
-            with model.disable_adapter():
+            with _base.disable_adapter():
                 ref_out = model(input_ids=input_ids, attention_mask=attention_mask)
         ref_log_probs = compute_per_sequence_log_probs(ref_out.logits.detach(), labels)
 

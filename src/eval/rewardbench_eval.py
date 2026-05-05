@@ -96,13 +96,15 @@ def _batch_log_probs(
     with torch.no_grad():
         out = model(input_ids=input_ids, attention_mask=attn)
 
-    logits       = out.logits
-    shift_logits = logits[:, :-1, :].float()
-    shift_labels = labels[:, 1:]
+    # Move logits to CPU to handle device_map='auto' multi-GPU models and
+    # avoid OOM from large vocab-size (Qwen-7B: ~152 K) logit tensors.
+    logits       = out.logits.cpu().float()       # [N, L, V]
+    shift_logits = logits[:, :-1, :]              # [N, L-1, V]
+    shift_labels = labels[:, 1:].cpu()            # [N, L-1]
     log_probs    = F.log_softmax(shift_logits, dim=-1)
     mask         = shift_labels != -100
     gathered     = log_probs.gather(-1, shift_labels.clamp(0).unsqueeze(-1)).squeeze(-1)
-    return (gathered * mask).sum(1)  # [N]
+    return (gathered * mask).sum(1)  # [N] on CPU
 
 
 # ---------------------------------------------------------------------------

@@ -113,11 +113,16 @@ def build_listwise_dataset(
         ranking = example["ranking"]
 
         # Format prompt with chat template (stops before the assistant response)
-        prompt_ids: List[int] = tokenizer.apply_chat_template(
+        _prompt_enc = tokenizer.apply_chat_template(
             [{"role": "user", "content": prompt}],
             add_generation_prompt=True,
             tokenize=True,
         )
+        # Newer transformers may return BatchEncoding; normalise to plain list
+        if hasattr(_prompt_enc, "input_ids"):
+            prompt_ids: List[int] = list(_prompt_enc.input_ids)
+        else:
+            prompt_ids: List[int] = list(_prompt_enc)
         if len(prompt_ids) > max_prompt_length:
             prompt_ids = prompt_ids[:max_prompt_length]
         prompt_len = len(prompt_ids)
@@ -154,6 +159,134 @@ def build_listwise_dataset(
     )
     tokenised.set_format(type=None)   # keep as Python lists for collator
     logger.info("Tokenisation done. Dataset size: %d", len(tokenised))
+    return tokenised
+
+
+# ---------------------------------------------------------------------------
+# K=8 dataset builder (pair consecutive K=4 examples)
+# ---------------------------------------------------------------------------
+
+def build_listwise_dataset_k8(
+    tokenizer: PreTrainedTokenizerBase,
+    n_samples: Optional[int] = None,
+    max_prompt_length: int = 256,
+    max_length: int = 512,
+    seed: int = 42,
+    noise_fn: Optional[Callable[[List[int], List[float]], List[int]]] = None,
+) -> Dataset:
+    """
+    Build a K=8 listwise training dataset by pairing consecutive K=4 examples.
+
+    For each K=8 training example:
+      - Prompt / responses 0-3 : from example_A (on-topic)
+      - Responses 4-7          : from example_B (off-topic hard negatives)
+      - Ranking                : all 8 responses sorted by their combined scores
+
+    This preserves the mathematical structure needed to test the Plackett-Luce
+    hypothesis (larger K → richer listwise signal) while reusing UltraFeedback
+    whose raw examples each have exactly 4 completions.
+
+    Evaluation is always performed on the K=4 held-out set for direct
+    comparability with K=4 training experiments.
+
+    Args:
+        n_samples: number of K=8 training examples to create.
+                   Each uses 2 raw examples, so (2*n_samples) raw rows are loaded.
+    """
+    n_raw = (2 * n_samples + 200) if n_samples is not None else None
+
+    logger.info("Loading openbmb/UltraFeedback for K=8 dataset (need ~%s raw rows) ...",
+                n_raw or "all")
+    raw = load_dataset("openbmb/UltraFeedback", split="train")
+    if n_raw is not None:
+        raw = raw.shuffle(seed=seed).select(range(min(n_raw, len(raw))))
+
+    def extract_fields(example):
+        completions = example["completions"]
+        if len(completions) != 4:
+            return None
+        scores, responses = [], []
+        for c in completions:
+            s = c.get("overall_score")
+            if s is None:
+                return None
+            try:
+                scores.append(float(s))
+            except (TypeError, ValueError):
+                return None
+            responses.append(c["response"])
+        ranking = sorted(range(4), key=lambda k: scores[k], reverse=True)
+        return {"prompt": example["instruction"],
+                "responses": responses, "scores": scores, "ranking": ranking}
+
+    logger.info("Extracting fields ...")
+    processed = raw.map(extract_fields, remove_columns=raw.column_names, num_proc=4)
+    processed = processed.filter(lambda x: x["prompt"] is not None, num_proc=4)
+    logger.info("K=4 rows after filtering: %d (need %d pairs)", len(processed),
+                n_samples or len(processed) // 2)
+
+    # Build paired K=8 examples
+    k8_rows = []
+    for i in range(0, len(processed) - 1, 2):
+        ex_a = processed[i]
+        ex_b = processed[i + 1]
+        combined_responses = ex_a["responses"] + ex_b["responses"]   # length 8
+        combined_scores    = ex_a["scores"]    + ex_b["scores"]       # length 8
+        combined_ranking   = sorted(range(8), key=lambda k: combined_scores[k], reverse=True)
+        k8_rows.append({
+            "prompt":    ex_a["prompt"],   # anchor on first example's prompt
+            "responses": combined_responses,
+            "scores":    combined_scores,
+            "ranking":   combined_ranking,
+        })
+        if n_samples is not None and len(k8_rows) >= n_samples:
+            break
+
+    logger.info("Created %d K=8 examples from %d raw rows", len(k8_rows), len(processed))
+
+    from datasets import Dataset as HFDataset
+    paired = HFDataset.from_list(k8_rows)
+
+    if noise_fn is not None:
+        def apply_noise(example):
+            return {"ranking": noise_fn(example["ranking"], example["scores"])}
+        paired = paired.map(apply_noise, num_proc=1)
+        logger.info("Noise injection applied to K=8 dataset.")
+
+    # Tokenise — same logic as K=4 version
+    def tokenise_sample(example):
+        prompt    = example["prompt"]
+        responses = example["responses"]
+        ranking   = example["ranking"]
+
+        _enc = tokenizer.apply_chat_template(
+            [{"role": "user", "content": prompt}],
+            add_generation_prompt=True, tokenize=True,
+        )
+        prompt_ids: List[int] = list(_enc.input_ids if hasattr(_enc, "input_ids") else _enc)
+        prompt_ids = prompt_ids[:max_prompt_length]
+        prompt_len = len(prompt_ids)
+
+        out = {"ranking": ranking}
+        for k, resp in enumerate(responses):
+            resp_ids: List[int] = tokenizer(resp, add_special_tokens=False).input_ids
+            resp_ids = resp_ids + [tokenizer.eos_token_id]
+            max_resp = max(max_length - prompt_len, 1)
+            resp_ids = resp_ids[:max_resp]
+            full_ids = prompt_ids + resp_ids
+            out[f"input_ids_{k}"]      = full_ids
+            out[f"attention_mask_{k}"] = [1] * len(full_ids)
+            out[f"labels_{k}"]         = [-100] * prompt_len + resp_ids
+        return out
+
+    logger.info("Tokenising K=8 samples ...")
+    tokenised = paired.map(
+        tokenise_sample,
+        remove_columns=["prompt", "responses", "scores"],
+        num_proc=4,
+    )
+    tokenised.set_format(type=None)
+    logger.info("K=8 tokenisation done. Dataset size: %d", len(tokenised))
     return tokenised
 
 

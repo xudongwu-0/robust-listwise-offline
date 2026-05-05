@@ -67,12 +67,19 @@ def build_held_out_k4(
 
     # Pre-tokenise helper
     def _tok(prompt_text: str, response_text: str) -> Tuple[List[int], List[int]]:
-        prompt_ids = tokenizer.apply_chat_template(
+        _enc = tokenizer.apply_chat_template(
             [{"role": "user", "content": prompt_text}],
             add_generation_prompt=True,
             tokenize=True,
-        )[:max_prompt_length]
-        resp_ids = tokenizer(response_text, add_special_tokens=False).input_ids
+        )
+        # transformers>=5.x may return BatchEncoding instead of list
+        if hasattr(_enc, "input_ids"):
+            prompt_ids: List[int] = list(_enc.input_ids)
+        else:
+            prompt_ids = list(_enc)
+        prompt_ids = prompt_ids[:max_prompt_length]
+        _resp_enc = tokenizer(response_text, add_special_tokens=False).input_ids
+        resp_ids: List[int] = list(_resp_enc)
         max_resp = max(max_length - len(prompt_ids), 1)
         resp_ids = resp_ids[:max_resp] + [tokenizer.eos_token_id]
         input_ids = prompt_ids + resp_ids
@@ -115,31 +122,40 @@ def _batch_log_probs(
     lbl_list: List[List[int]],
     device: str,
 ) -> torch.Tensor:
-    """Padded batch forward → per-sequence log-prob sums [N]."""
+    """Padded batch forward → per-sequence log-prob sums [N].
+
+    Works with both single-GPU and device_map='auto' multi-GPU models:
+    logits are moved to CPU before softmax to avoid device-mismatch errors
+    and to keep peak GPU memory low (Qwen-7B vocab ≈ 152 K tokens,
+    float32 logits for batch × seq_len can be several GB).
+    """
     N      = len(ids_list)
     max_len = max(len(x) for x in ids_list)
     pad_id  = getattr(model.config, "pad_token_id", 0) or 0
 
     input_ids = torch.full((N, max_len), pad_id, dtype=torch.long, device=device)
     attn      = torch.zeros(N, max_len, dtype=torch.long, device=device)
-    labels    = torch.full((N, max_len), -100, dtype=torch.long, device=device)
+    labels_t  = torch.full((N, max_len), -100, dtype=torch.long)  # kept on CPU
 
     for i, (ids, lbl) in enumerate(zip(ids_list, lbl_list)):
         L = len(ids)
         input_ids[i, :L] = torch.tensor(ids, dtype=torch.long)
         attn[i, :L]      = 1
-        labels[i, :L]    = torch.tensor(lbl, dtype=torch.long)
+        labels_t[i, :L]  = torch.tensor(lbl, dtype=torch.long)
 
     with torch.no_grad():
         out = model(input_ids=input_ids, attention_mask=attn)
 
-    logits       = out.logits                               # [N, L, V]
-    shift_logits = logits[:, :-1, :].float()
-    shift_labels = labels[:, 1:]
-    log_probs    = F.log_softmax(shift_logits, dim=-1)
-    mask         = shift_labels != -100
-    gathered     = log_probs.gather(-1, shift_labels.clamp(0).unsqueeze(-1)).squeeze(-1)
-    return (gathered * mask).sum(1)                         # [N]
+    # Move logits to CPU immediately to free GPU memory and avoid device mismatch
+    # when model layers are spread across GPUs via device_map="auto".
+    logits       = out.logits.cpu().float()                 # [N, L, V]
+    shift_logits = logits[:, :-1, :]                        # [N, L-1, V]
+    shift_labels = labels_t[:, 1:]                          # [N, L-1]  (already CPU)
+
+    log_probs = F.log_softmax(shift_logits, dim=-1)
+    mask      = shift_labels != -100
+    gathered  = log_probs.gather(-1, shift_labels.clamp(0).unsqueeze(-1)).squeeze(-1)
+    return (gathered * mask).sum(1)                         # [N] on CPU
 
 
 # ---------------------------------------------------------------------------
@@ -252,7 +268,7 @@ def compute_ranking_metrics(
     n_train_skip: int = 5000,
     max_length: int = 512,
     max_prompt_length: int = 256,
-    eval_batch_size: int = 8,   # number of *sequences* per forward pass
+    eval_batch_size: int = 4,   # sequences per forward pass; use 1 for large models
     device: str = "cuda:0",
     seed: int = 42,
     held_out_examples: Optional[List[Dict]] = None,  # pass to avoid re-loading

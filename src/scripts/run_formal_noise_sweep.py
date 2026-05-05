@@ -118,6 +118,9 @@ NOISE_CONDITIONS = [
 
 MODEL_NAMES = ["nominal_bt", "nominal_pl", "robust_pl"]
 
+# Global rho for current run (overwritten in main when --rho is passed)
+_RHO_FOR_RUN = RHO
+
 
 # ---------------------------------------------------------------------------
 # Model builder / free
@@ -205,10 +208,10 @@ def run_one(
             model=model, args=targs, train_dataset=dataset,
             data_collator=collator, beta=BETA, K=K,
         )
-    else:  # robust_pl
+    else:  # robust_pl or robust_pl_rho*
         trainer = RobustListwiseTrainer(
             model=model, args=targs, train_dataset=dataset,
-            data_collator=collator, beta=BETA, K=K, rho=RHO,
+            data_collator=collator, beta=BETA, K=K, rho=_RHO_FOR_RUN,
         )
 
     train_result = trainer.train()
@@ -304,8 +307,10 @@ def parse_args():
                    help="Run only this noise level (requires --noise_type)")
     p.add_argument("--models",       nargs="+",
                    default=MODEL_NAMES,
-                   choices=MODEL_NAMES,
-                   help="Which models to include (default: all three)")
+                   help="Models to run (default: all three). Pass robust_pl_rho* for custom rho.")
+    p.add_argument("--rho",          type=float, default=None,
+                   help="Override RHO for RobustPL (default: 0.1). "
+                        "Model name becomes robust_pl_rho{rho*1000:.0f}.")
     return p.parse_args()
 
 
@@ -315,6 +320,19 @@ def parse_args():
 
 def main():
     args = parse_args()
+
+    # Resolve rho
+    rho_val = args.rho if args.rho is not None else RHO
+    rho_tag = f"_rho{rho_val * 1000:03.0f}" if args.rho is not None else ""
+    # When custom rho, rename robust_pl → robust_pl_rho<tag> in output dirs/CSV
+    models_to_run = [
+        f"robust_pl{rho_tag}" if m == "robust_pl" else m
+        for m in args.models
+    ]
+
+    # Expose the resolved rho to run_one via a global-ish mechanism
+    global _RHO_FOR_RUN
+    _RHO_FOR_RUN = rho_val
 
     # --- Sanity check noise module ---
     verify_noise_functions()
@@ -330,8 +348,6 @@ def main():
         noise_conditions = [(args.noise_type, level)]
     else:
         noise_conditions = NOISE_CONDITIONS
-
-    models_to_run = args.models
 
     results_path = os.path.join(OUTPUT_DIR, "noise_sweep_results.csv")
     all_results: List[Dict] = []

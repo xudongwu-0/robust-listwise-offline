@@ -32,13 +32,19 @@ def _tokenize_pair(
     max_length: int,
 ):
     """Return (input_ids, labels) as 1-D Python lists for one (prompt, response) pair."""
-    prompt_ids: List[int] = tokenizer.apply_chat_template(
+    _enc = tokenizer.apply_chat_template(
         [{"role": "user", "content": prompt}],
         add_generation_prompt=True,
         tokenize=True,
-    )[:max_prompt_length]
+    )
+    # transformers>=5.x may return BatchEncoding instead of list
+    if hasattr(_enc, "input_ids"):
+        prompt_ids: List[int] = list(_enc.input_ids)
+    else:
+        prompt_ids = list(_enc)
+    prompt_ids = prompt_ids[:max_prompt_length]
 
-    resp_ids: List[int] = tokenizer(response, add_special_tokens=False).input_ids
+    resp_ids: List[int] = list(tokenizer(response, add_special_tokens=False).input_ids)
     max_resp = max_length - len(prompt_ids)
     max_resp = max(max_resp, 1)
     resp_ids = resp_ids[:max_resp] + [tokenizer.eos_token_id]
@@ -69,16 +75,17 @@ def _batch_log_probs(model, input_ids_list, labels_list, device):
     with torch.no_grad():
         output = model(input_ids=input_ids_t, attention_mask=attn_t)
 
-    logits = output.logits                      # [N, L, V]
-    shift_logits = logits[:, :-1, :].float()    # bfloat16 → float32 for stability
-    shift_labels = labels_t[:, 1:]
+    # Move to CPU for device_map='auto' multi-GPU compatibility and memory safety
+    logits       = output.logits.cpu().float()
+    shift_logits = logits[:, :-1, :]
+    shift_labels = labels_t[:, 1:].cpu()
 
     log_probs = F.log_softmax(shift_logits, dim=-1)
     mask      = shift_labels != -100
     indices   = shift_labels.clamp(min=0).unsqueeze(-1)
     token_lp  = log_probs.gather(-1, indices).squeeze(-1) * mask
 
-    return token_lp.sum(dim=1)  # [N]
+    return token_lp.sum(dim=1)  # [N] on CPU
 
 
 # ---------------------------------------------------------------------------

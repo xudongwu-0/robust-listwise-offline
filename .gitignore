@@ -31,7 +31,22 @@ Thumbs.db
 
 # Large experiment artifacts (do not push by default)
 outputs/
+logs/
+wandb/
 
-# Local datasets
-data/raw/
-data/processed/
+# Checkpoints and model weights
+checkpoints/
+*.log
+*.pt
+*.pth
+*.bin
+*.safetensors
+
+# Local datasets (top-level data/ and datasets/ only)
+/data/raw/
+/data/processed/
+/data/
+/datasets/
+
+# Secrets / local env
+.env
