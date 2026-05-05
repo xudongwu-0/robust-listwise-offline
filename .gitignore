@@ -50,3 +50,4 @@ checkpoints/
 
 # Secrets / local env
 .env
+docs/

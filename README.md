@@ -10,8 +10,6 @@ Offline fixed-list (K=4) preference optimization on UltraFeedback, comparing fiv
 | TV-DR-DPO | ρ=0.10, β=0.1 | `tv_dr_dpo_rho010` |
 | KLDPO | τ=1.00, β=0.1 | `kldpo_tau100` |
 
-Math derivation: [docs/ROBUST_LISTWISE_DPO_MATH.md](docs/ROBUST_LISTWISE_DPO_MATH.md)
-
 ---
 
 ## Setup
